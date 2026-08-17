@@ -2,221 +2,466 @@ pipeline {
 
     agent any
 
-    environment {
-        CI_JOB  = 'Java_CI_Project'
+    parameters {
+        string(
+            name: 'CI_BUILD_NUMBER',
+            defaultValue: '',
+            description: 'Successful build number of Java_CI_Project'
+        )
+    }
 
-        VM_IP   = '43.204.217.49'
+    environment {
+
+        // ==============================
+        // CI CONFIGURATION
+        // ==============================
+        CI_JOB = 'Java_CI_Project'
+
+        ARTIFACT = 'target/java-vm-demo-1.0.jar'
+
+
+        // ==============================
+        // EC2 CONFIGURATION
+        // ==============================
+        VM_HOST = '43.204.217.49'
         VM_USER = 'ec2-user'
 
-        APP_DIR  = '/opt/java-vm-demo'
+        SSH_CREDENTIAL = 'ec2-ssh-key'
+
+
+        // ==============================
+        // APPLICATION CONFIGURATION
+        // ==============================
+        APP_NAME = 'java-vm-demo'
+        APP_DIR = '/opt/java-app'
         JAR_NAME = 'java-vm-demo.jar'
+
         APP_PORT = '8080'
     }
 
+
     stages {
 
-        stage('Download Artifact From CI') {
-            steps {
-                echo "Downloading artifact from: ${CI_JOB}"
+        // ==========================================================
+        // 1. DOWNLOAD ARTIFACT FROM CI
+        // ==========================================================
 
-                copyArtifacts(
-                    projectName: "${CI_JOB}",
-                    selector: lastSuccessful(),
-                    filter: 'target/*.jar',
-                    flatten: true
-                )
+        stage('Download Artifact From CI') {
+
+            steps {
+
+                script {
+
+                    if (!params.CI_BUILD_NUMBER?.trim()) {
+
+                        error(
+                            'CI_BUILD_NUMBER is required. ' +
+                            'Enter the successful Java_CI_Project build number.'
+                        )
+                    }
+
+                    echo """
+                    ========================================
+                    DOWNLOADING ARTIFACT
+                    ========================================
+
+                    CI Job     : ${CI_JOB}
+                    CI Build   : ${params.CI_BUILD_NUMBER}
+                    Artifact   : ${ARTIFACT}
+
+                    ========================================
+                    """
+
+                    copyArtifacts(
+                        projectName: CI_JOB,
+                        selector: specific(params.CI_BUILD_NUMBER),
+                        filter: ARTIFACT,
+                        fingerprintArtifacts: true
+                    )
+                }
             }
         }
 
+
+        // ==========================================================
+        // 2. VERIFY ARTIFACT
+        // ==========================================================
+
         stage('Verify Artifact') {
+
             steps {
+
                 sh '''
+                    set -e
+
                     echo "Checking downloaded artifact..."
 
-                    ls -lh
+                    ls -lh target/ || true
 
-                    JAR_FILE=$(find . -maxdepth 1 -name "*.jar" | head -1)
-
-                    if [ -z "$JAR_FILE" ]; then
-                        echo "ERROR: JAR file not found"
+                    if [ ! -f target/java-vm-demo-1.0.jar ]; then
+                        echo "ERROR: JAR file not found!"
                         exit 1
                     fi
 
-                    echo "Artifact found:"
-                    ls -lh "$JAR_FILE"
+                    echo "Artifact found successfully."
+
+                    ls -lh target/java-vm-demo-1.0.jar
+
+                    echo "Artifact verification successful."
                 '''
             }
         }
 
+
+        // ==========================================================
+        // 3. TEST SSH CONNECTION
+        // ==========================================================
+
         stage('Test SSH Connection') {
+
             steps {
-                sshagent(['aws-vm-key']) {
+
+                sshagent(credentials: [SSH_CREDENTIAL]) {
+
                     sh '''
-                        ssh -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_IP} \
-                        "echo SSH connection successful"
+                        set -e
+
+                        echo "Testing SSH connection to EC2..."
+
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            -o ConnectTimeout=10 \
+                            ${VM_USER}@${VM_HOST} \
+                            "echo SSH connection successful; hostname; whoami"
                     '''
                 }
             }
         }
+
+
+        // ==========================================================
+        // 4. INSTALL JAVA 17
+        // ==========================================================
 
         stage('Install Java 17') {
-            steps {
-                sshagent(['aws-vm-key']) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_IP} << 'EOF'
 
+            steps {
+
+                sshagent(credentials: [SSH_CREDENTIAL]) {
+
+                    sh '''
                         set -e
 
-                        echo "Checking Java..."
+                        echo "Checking Java on EC2..."
 
-                        if java -version 2>&1 | grep -q '"17'; then
-                            echo "Java 17 already installed"
-                        else
-                            echo "Installing Java 17..."
-                            sudo dnf install -y java-17-amazon-corretto
-                        fi
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
 
-                        echo "Java version:"
-                        java -version
+                            if command -v java >/dev/null 2>&1
+                            then
 
-                        EOF
-                    '''
-                }
-            }
-        }
+                                echo "Java already installed."
+                                java -version
 
-        stage('Prepare Application Directory') {
-            steps {
-                sshagent(['aws-vm-key']) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_IP} << 'EOF'
+                            else
 
-                        sudo mkdir -p ${APP_DIR}
-                        sudo chown -R ${VM_USER}:${VM_USER} ${APP_DIR}
+                                echo "Java not found."
+                                echo "Installing Java 17..."
 
-                        echo "Application directory ready"
+                                sudo dnf install -y java-17-amazon-corretto
 
-                        EOF
-                    '''
-                }
-            }
-        }
+                                echo "Java installation completed."
 
-        stage('Copy JAR To VM') {
-            steps {
-                sshagent(['aws-vm-key']) {
-                    sh '''
-                        JAR_FILE=$(find . -maxdepth 1 -name "*.jar" | head -1)
+                                java -version
 
-                        echo "Copying $JAR_FILE to VM..."
-
-                        scp -o StrictHostKeyChecking=no \
-                        "$JAR_FILE" \
-                        ${VM_USER}@${VM_IP}:${APP_DIR}/${JAR_NAME}
-                    '''
-                }
-            }
-        }
-
-        stage('Deploy Application') {
-            steps {
-                sshagent(['aws-vm-key']) {
-                    sh '''
-                        ssh -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_IP} << 'EOF'
-
-                        set -e
-
-                        echo "Stopping previous application..."
-
-                        if [ -f ${APP_DIR}/application.pid ]; then
-
-                            PID=$(cat ${APP_DIR}/application.pid)
-
-                            if kill -0 $PID 2>/dev/null; then
-                                kill $PID
-                                sleep 5
                             fi
 
-                            rm -f ${APP_DIR}/application.pid
+                            '
+                    '''
+                }
+            }
+        }
 
-                        fi
+
+        // ==========================================================
+        // 5. PREPARE APPLICATION DIRECTORY
+        // ==========================================================
+
+        stage('Prepare Application') {
+
+            steps {
+
+                sshagent(credentials: [SSH_CREDENTIAL]) {
+
+                    sh '''
+                        set -e
+
+                        echo "Preparing application directory..."
+
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
+
+                            sudo mkdir -p ${APP_DIR}
+
+                            sudo chown -R ${VM_USER}:${VM_USER} ${APP_DIR}
+
+                            echo "Application directory prepared."
+
+                            ls -ld ${APP_DIR}
+
+                            '
+                    '''
+                }
+            }
+        }
+
+
+        // ==========================================================
+        // 6. COPY JAR TO EC2
+        // ==========================================================
+
+        stage('Copy JAR') {
+
+            steps {
+
+                sshagent(credentials: [SSH_CREDENTIAL]) {
+
+                    sh '''
+                        set -e
+
+                        echo "Copying JAR to EC2..."
+
+                        scp \
+                            -o StrictHostKeyChecking=no \
+                            target/java-vm-demo-1.0.jar \
+                            ${VM_USER}@${VM_HOST}:${APP_DIR}/${JAR_NAME}
+
+                        echo "JAR copied successfully."
+
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} \
+                            "ls -lh ${APP_DIR}/${JAR_NAME}"
+                    '''
+                }
+            }
+        }
+
+
+        // ==========================================================
+        // 7. CREATE SYSTEMD SERVICE
+        // ==========================================================
+
+        stage('Configure Systemd') {
+
+            steps {
+
+                sshagent(credentials: [SSH_CREDENTIAL]) {
+
+                    sh '''
+                        set -e
+
+                        echo "Creating systemd service..."
+
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
+
+                            sudo tee /etc/systemd/system/${APP_NAME}.service > /dev/null <<EOF
+
+[Unit]
+Description=Java VM Demo Spring Boot Application
+After=network.target
+
+[Service]
+Type=simple
+User=${VM_USER}
+WorkingDirectory=${APP_DIR}
+ExecStart=/usr/bin/java -jar ${APP_DIR}/${JAR_NAME}
+Restart=always
+RestartSec=5
+SuccessExitStatus=143
+
+[Install]
+WantedBy=multi-user.target
+
+EOF
+
+                            echo "Reloading systemd..."
+
+                            sudo systemctl daemon-reload
+
+                            echo "Enabling application service..."
+
+                            sudo systemctl enable ${APP_NAME}
+
+                            echo "Systemd configuration completed."
+
+                            '
+                    '''
+                }
+            }
+        }
+
+
+        // ==========================================================
+        // 8. RESTART APPLICATION
+        // ==========================================================
+
+        stage('Deploy Application') {
+
+            steps {
+
+                sshagent(credentials: [SSH_CREDENTIAL]) {
+
+                    sh '''
+                        set -e
+
+                        echo "Stopping old application if running..."
+
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
+
+                            sudo systemctl stop ${APP_NAME} || true
+
+                            '
 
                         echo "Starting new application..."
 
-                        nohup java -jar \
-                        ${APP_DIR}/${JAR_NAME} \
-                        --server.port=${APP_PORT} \
-                        > ${APP_DIR}/application.log 2>&1 &
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
 
-                        echo $! > ${APP_DIR}/application.pid
+                            sudo systemctl start ${APP_NAME}
 
-                        echo "Application PID:"
-                        cat ${APP_DIR}/application.pid
+                            sleep 5
 
-                        sleep 10
+                            sudo systemctl status ${APP_NAME} --no-pager
 
-                        echo "Application started"
-
-                        EOF
+                            '
                     '''
                 }
             }
         }
 
+
+        // ==========================================================
+        // 9. HEALTH CHECK
+        // ==========================================================
+
         stage('Health Check') {
+
             steps {
-                sshagent(['aws-vm-key']) {
+
+                sshagent(credentials: [SSH_CREDENTIAL]) {
+
                     sh '''
-                        ssh -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_IP} << 'EOF'
+                        set -e
 
-                        echo "Checking application..."
+                        echo "Waiting for application..."
 
-                        if curl -f http://localhost:${APP_PORT}/; then
-                            echo "Application is UP"
-                        else
-                            echo "Application health check FAILED"
-                            echo "Application logs:"
-                            tail -100 ${APP_DIR}/application.log
-                            exit 1
-                        fi
+                        sleep 5
 
-                        EOF
+                        echo "Checking systemd status..."
+
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
+
+                            sudo systemctl is-active --quiet ${APP_NAME}
+
+                            if [ $? -ne 0 ]
+                            then
+                                echo "Application service is not running."
+
+                                sudo systemctl status ${APP_NAME} --no-pager
+
+                                sudo journalctl -u ${APP_NAME} \
+                                    -n 50 \
+                                    --no-pager
+
+                                exit 1
+                            fi
+
+                            echo "Application service is running."
+
+                            '
+
+                        echo "Checking port ${APP_PORT}..."
+
+                        ssh \
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
+
+                            curl \
+                                --fail \
+                                --silent \
+                                --show-error \
+                                http://localhost:${APP_PORT}/ \
+                                > /dev/null
+
+                            '
+
+                        echo "========================================"
+                        echo "APPLICATION HEALTH CHECK PASSED"
+                        echo "========================================"
                     '''
                 }
             }
         }
     }
 
+
+    // ==============================================================
+    // POST ACTIONS
+    // ==============================================================
+
     post {
 
         success {
-            echo '''
-            ==========================================
-                    CD DEPLOYMENT SUCCESS
-            ==========================================
 
-            Application deployed successfully.
+            echo """
+            ========================================
+                     CD SUCCESS
+            ========================================
 
-            VM       : 43.204.217.49
-            Port     : 8080
-            ==========================================
-            '''
+            CI Job       : ${CI_JOB}
+            CI Build     : ${params.CI_BUILD_NUMBER}
+
+            Application  : ${APP_NAME}
+            Server       : ${VM_HOST}
+            Port         : ${APP_PORT}
+
+            Deployment completed successfully.
+
+            ========================================
+            """
         }
 
         failure {
-            echo '''
-            ==========================================
-                    CD DEPLOYMENT FAILED
-            ==========================================
 
-            Check the failed stage and console logs.
-            ==========================================
-            '''
+            echo """
+            ========================================
+                     CD FAILED
+            ========================================
+
+            CI Job       : ${CI_JOB}
+            CI Build     : ${params.CI_BUILD_NUMBER}
+
+            Server       : ${VM_HOST}
+
+            Check the failed stage and console log.
+
+            ========================================
+            """
+        }
+
+        always {
+
+            echo "CD Pipeline execution completed."
         }
     }
 }
