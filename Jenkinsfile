@@ -3,18 +3,15 @@ pipeline {
     agent any
 
     environment {
-        CI_JOB = 'Java_CI'
+
+        // IMPORTANT: Put your EXACT Jenkins CI job name here
+        CI_JOB = 'Java_cd_test'
 
         VM_IP = '43.204.217.49'
         VM_USER = 'ec2-user'
 
-        APP_NAME = 'java-vm-demo'
         APP_DIR = '/opt/java-vm-demo'
-
         JAR_NAME = 'java-vm-demo.jar'
-
-        TOMCAT_DIR = '/opt/tomcat'
-        TOMCAT_PORT = '8080'
     }
 
     stages {
@@ -23,7 +20,7 @@ pipeline {
 
             steps {
 
-                echo "Downloading artifact from CI job: ${CI_JOB}"
+                echo "Downloading artifact from CI: ${CI_JOB}"
 
                 copyArtifacts(
                     projectName: "${CI_JOB}",
@@ -39,17 +36,20 @@ pipeline {
             steps {
 
                 sh '''
-                    echo "Files in workspace:"
+                    echo "Workspace contents:"
                     ls -lh
 
                     echo "Checking JAR..."
 
-                    if [ ! -f *.jar ]; then
-                        echo "ERROR: JAR file not found"
+                    JAR_FILE=$(find . -maxdepth 1 -name "*.jar" | head -1)
+
+                    if [ -z "$JAR_FILE" ]; then
+                        echo "ERROR: No JAR found"
                         exit 1
                     fi
 
-                    ls -lh *.jar
+                    echo "JAR found:"
+                    ls -lh "$JAR_FILE"
                 '''
             }
         }
@@ -60,11 +60,11 @@ pipeline {
 
                 sshagent(['aws-vm-key']) {
 
-                    sh """
+                    sh '''
                         ssh -o StrictHostKeyChecking=no \
                         ${VM_USER}@${VM_IP} \
-                        'echo SSH connection successful'
-                    """
+                        "echo SSH connection successful"
+                    '''
                 }
             }
         }
@@ -75,7 +75,7 @@ pipeline {
 
                 sshagent(['aws-vm-key']) {
 
-                    sh """
+                    sh '''
 
                         ssh -o StrictHostKeyChecking=no \
                         ${VM_USER}@${VM_IP} << 'EOF'
@@ -84,8 +84,10 @@ pipeline {
 
                         echo "Checking Java..."
 
-                        if java -version 2>&1 | grep -q '17'; then
+                        if java -version 2>&1 | grep -q '"17'; then
+
                             echo "Java 17 already installed"
+
                         else
 
                             echo "Installing Java 17..."
@@ -97,53 +99,7 @@ pipeline {
                         java -version
 
                         EOF
-
-                    """
-                }
-            }
-        }
-
-        stage('Install Tomcat') {
-
-            steps {
-
-                sshagent(['aws-vm-key']) {
-
-                    sh """
-
-                        ssh -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_IP} << 'EOF'
-
-                        set -e
-
-                        if [ -d "${TOMCAT_DIR}" ]; then
-
-                            echo "Tomcat already installed"
-
-                        else
-
-                            echo "Installing Tomcat..."
-
-                            sudo mkdir -p ${TOMCAT_DIR}
-
-                            cd /tmp
-
-                            curl -L -o tomcat.tar.gz \
-                            https://dlcdn.apache.org/tomcat/tomcat-10/v10.1.46/bin/apache-tomcat-10.1.46.tar.gz
-
-                            sudo tar -xzf tomcat.tar.gz \
-                            --strip-components=1 \
-                            -C ${TOMCAT_DIR}
-
-                            sudo chown -R ${VM_USER}:${VM_USER} ${TOMCAT_DIR}
-
-                        fi
-
-                        echo "Tomcat installation completed"
-
-                        EOF
-
-                    """
+                    '''
                 }
             }
         }
@@ -154,7 +110,7 @@ pipeline {
 
                 sshagent(['aws-vm-key']) {
 
-                    sh """
+                    sh '''
 
                         ssh -o StrictHostKeyChecking=no \
                         ${VM_USER}@${VM_IP} << 'EOF'
@@ -164,8 +120,7 @@ pipeline {
                         sudo chown -R ${VM_USER}:${VM_USER} ${APP_DIR}
 
                         EOF
-
-                    """
+                    '''
                 }
             }
         }
@@ -176,13 +131,16 @@ pipeline {
 
                 sshagent(['aws-vm-key']) {
 
-                    sh """
+                    sh '''
+
+                        JAR_FILE=$(find . -maxdepth 1 -name "*.jar" | head -1)
+
+                        echo "Copying: $JAR_FILE"
 
                         scp -o StrictHostKeyChecking=no \
-                        *.jar \
+                        "$JAR_FILE" \
                         ${VM_USER}@${VM_IP}:${APP_DIR}/${JAR_NAME}
-
-                    """
+                    '''
                 }
             }
         }
@@ -193,7 +151,7 @@ pipeline {
 
                 sshagent(['aws-vm-key']) {
 
-                    sh """
+                    sh '''
 
                         ssh -o StrictHostKeyChecking=no \
                         ${VM_USER}@${VM_IP} << 'EOF'
@@ -202,28 +160,34 @@ pipeline {
 
                         echo "Stopping old application..."
 
-                        sudo pkill -f "${JAR_NAME}" || true
+                        if [ -f ${APP_DIR}/application.pid ]; then
 
-                        sleep 5
+                            PID=$(cat ${APP_DIR}/application.pid)
 
-                        echo "Starting new application..."
+                            sudo kill $PID || true
+
+                            rm -f ${APP_DIR}/application.pid
+
+                            sleep 5
+
+                        fi
+
+                        echo "Starting application..."
 
                         nohup java -jar \
                         ${APP_DIR}/${JAR_NAME} \
-                        --server.port=${TOMCAT_PORT} \
+                        --server.port=8080 \
                         > ${APP_DIR}/application.log 2>&1 &
 
-                        echo \$! > ${APP_DIR}/application.pid
+                        echo $! > ${APP_DIR}/application.pid
+
+                        echo "Application PID:"
+                        cat ${APP_DIR}/application.pid
 
                         sleep 10
 
-                        echo "Application started"
-
-                        cat ${APP_DIR}/application.pid
-
                         EOF
-
-                    """
+                    '''
                 }
             }
         }
@@ -234,7 +198,7 @@ pipeline {
 
                 sshagent(['aws-vm-key']) {
 
-                    sh """
+                    sh '''
 
                         ssh -o StrictHostKeyChecking=no \
                         ${VM_USER}@${VM_IP} << 'EOF'
@@ -243,11 +207,12 @@ pipeline {
 
                         sleep 5
 
-                        curl -f http://localhost:${TOMCAT_PORT}/ || {
+                        curl -f http://localhost:8080/ || {
 
                             echo "Application health check failed"
 
                             echo "Application logs:"
+
                             tail -100 ${APP_DIR}/application.log
 
                             exit 1
@@ -256,8 +221,7 @@ pipeline {
                         echo "Application is UP"
 
                         EOF
-
-                    """
+                    '''
                 }
             }
         }
@@ -273,7 +237,6 @@ pipeline {
             ========================================
             Application deployed successfully.
             '''
-
         }
 
         failure {
@@ -284,7 +247,6 @@ pipeline {
             ========================================
             Check the failed stage.
             '''
-
         }
     }
 }
