@@ -2,273 +2,263 @@ pipeline {
 
     agent any
 
-    parameters {
-        string(
-            name: 'CI_BUILD_NUMBER',
-            defaultValue: '1',
-            description: 'Successful CI build number to deploy'
-        )
-    }
-
     environment {
-
         CI_JOB = 'Java_CI'
 
-        VM_HOST = '43.204.217.49'
+        VM_IP = '43.204.217.49'
         VM_USER = 'ec2-user'
 
         APP_NAME = 'java-vm-demo'
         APP_DIR = '/opt/java-vm-demo'
 
-        SSH_CREDENTIALS = 'vm-deploy-key'
+        JAR_NAME = 'java-vm-demo.jar'
+
+        TOMCAT_DIR = '/opt/tomcat'
+        TOMCAT_PORT = '8080'
     }
 
     stages {
 
         stage('Download Artifact From CI') {
+
             steps {
 
-                echo "Downloading artifact from CI"
-                echo "CI Job     : ${CI_JOB}"
-                echo "Build      : ${CI_BUILD_NUMBER}"
+                echo "Downloading artifact from CI job: ${CI_JOB}"
 
                 copyArtifacts(
                     projectName: "${CI_JOB}",
-                    selector: specific("${CI_BUILD_NUMBER}"),
+                    selector: lastSuccessful(),
                     filter: 'target/*.jar',
-                    fingerprintArtifacts: true
+                    flatten: true
                 )
-
-                sh '''
-                    echo "Downloaded artifacts:"
-                    find target -type f -name "*.jar" -ls
-                '''
             }
         }
 
         stage('Verify Artifact') {
+
             steps {
 
                 sh '''
-                    JAR_FILE=$(find target -type f -name "*.jar" | head -1)
+                    echo "Files in workspace:"
+                    ls -lh
 
-                    if [ -z "$JAR_FILE" ]; then
+                    echo "Checking JAR..."
+
+                    if [ ! -f *.jar ]; then
                         echo "ERROR: JAR file not found"
                         exit 1
                     fi
 
-                    echo "JAR found:"
-                    ls -lh "$JAR_FILE"
+                    ls -lh *.jar
                 '''
             }
         }
 
         stage('Test SSH Connection') {
+
             steps {
 
-                sshagent(["${SSH_CREDENTIALS}"]) {
+                sshagent(['aws-vm-key']) {
 
                     sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        -o ConnectTimeout=10 \
-                        ${VM_USER}@${VM_HOST} \
-                        'hostname && whoami && java -version || true'
+                        ssh -o StrictHostKeyChecking=no \
+                        ${VM_USER}@${VM_IP} \
+                        'echo SSH connection successful'
                     """
                 }
             }
         }
 
         stage('Install Java 17') {
+
             steps {
 
-                sshagent(["${SSH_CREDENTIALS}"]) {
+                sshagent(['aws-vm-key']) {
 
                     sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_HOST} \
-                        'bash -s' << 'REMOTE'
 
-set -e
+                        ssh -o StrictHostKeyChecking=no \
+                        ${VM_USER}@${VM_IP} << 'EOF'
 
-echo "Checking Java..."
+                        set -e
 
-if command -v java >/dev/null 2>&1; then
+                        echo "Checking Java..."
 
-    echo "Java already installed"
-    java -version
+                        if java -version 2>&1 | grep -q '17'; then
+                            echo "Java 17 already installed"
+                        else
 
-else
+                            echo "Installing Java 17..."
 
-    echo "Installing Java 17..."
+                            sudo dnf install -y java-17-amazon-corretto
 
-    sudo dnf install -y java-17-amazon-corretto
+                        fi
 
-    java -version
+                        java -version
 
-fi
+                        EOF
 
-REMOTE
+                    """
+                }
+            }
+        }
+
+        stage('Install Tomcat') {
+
+            steps {
+
+                sshagent(['aws-vm-key']) {
+
+                    sh """
+
+                        ssh -o StrictHostKeyChecking=no \
+                        ${VM_USER}@${VM_IP} << 'EOF'
+
+                        set -e
+
+                        if [ -d "${TOMCAT_DIR}" ]; then
+
+                            echo "Tomcat already installed"
+
+                        else
+
+                            echo "Installing Tomcat..."
+
+                            sudo mkdir -p ${TOMCAT_DIR}
+
+                            cd /tmp
+
+                            curl -L -o tomcat.tar.gz \
+                            https://dlcdn.apache.org/tomcat/tomcat-10/v10.1.46/bin/apache-tomcat-10.1.46.tar.gz
+
+                            sudo tar -xzf tomcat.tar.gz \
+                            --strip-components=1 \
+                            -C ${TOMCAT_DIR}
+
+                            sudo chown -R ${VM_USER}:${VM_USER} ${TOMCAT_DIR}
+
+                        fi
+
+                        echo "Tomcat installation completed"
+
+                        EOF
+
                     """
                 }
             }
         }
 
         stage('Prepare Application') {
+
             steps {
 
-                sshagent(["${SSH_CREDENTIALS}"]) {
+                sshagent(['aws-vm-key']) {
 
                     sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_HOST} \
-                        'bash -s' << 'REMOTE'
 
-set -e
+                        ssh -o StrictHostKeyChecking=no \
+                        ${VM_USER}@${VM_IP} << 'EOF'
 
-sudo mkdir -p ${APP_DIR}
+                        sudo mkdir -p ${APP_DIR}
 
-if ! id ${APP_NAME} >/dev/null 2>&1; then
-    sudo useradd --system --shell /sbin/nologin ${APP_NAME}
-fi
+                        sudo chown -R ${VM_USER}:${VM_USER} ${APP_DIR}
 
-sudo chown -R ${APP_NAME}:${APP_NAME} ${APP_DIR}
+                        EOF
 
-REMOTE
                     """
                 }
             }
         }
 
         stage('Copy JAR') {
+
             steps {
 
-                sshagent(["${SSH_CREDENTIALS}"]) {
+                sshagent(['aws-vm-key']) {
 
-                    sh '''
-                        JAR_FILE=$(find target -type f -name "*.jar" | head -1)
+                    sh """
 
-                        echo "Copying:"
-                        echo "$JAR_FILE"
+                        scp -o StrictHostKeyChecking=no \
+                        *.jar \
+                        ${VM_USER}@${VM_IP}:${APP_DIR}/${JAR_NAME}
 
-                        scp \
-                        -o StrictHostKeyChecking=no \
-                        "$JAR_FILE" \
-                        ${VM_USER}@${VM_HOST}:/tmp/${APP_NAME}.jar
-                    '''
+                    """
                 }
             }
         }
 
         stage('Deploy Application') {
+
             steps {
 
-                sshagent(["${SSH_CREDENTIALS}"]) {
+                sshagent(['aws-vm-key']) {
 
                     sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_HOST} \
-                        'bash -s' << 'REMOTE'
 
-set -e
+                        ssh -o StrictHostKeyChecking=no \
+                        ${VM_USER}@${VM_IP} << 'EOF'
 
-sudo mv \
-    /tmp/${APP_NAME}.jar \
-    ${APP_DIR}/${APP_NAME}.jar
+                        set -e
 
-sudo chown \
-    ${APP_NAME}:${APP_NAME} \
-    ${APP_DIR}/${APP_NAME}.jar
+                        echo "Stopping old application..."
 
-sudo chmod 755 \
-    ${APP_DIR}/${APP_NAME}.jar
+                        sudo pkill -f "${JAR_NAME}" || true
 
-REMOTE
+                        sleep 5
+
+                        echo "Starting new application..."
+
+                        nohup java -jar \
+                        ${APP_DIR}/${JAR_NAME} \
+                        --server.port=${TOMCAT_PORT} \
+                        > ${APP_DIR}/application.log 2>&1 &
+
+                        echo \$! > ${APP_DIR}/application.pid
+
+                        sleep 10
+
+                        echo "Application started"
+
+                        cat ${APP_DIR}/application.pid
+
+                        EOF
+
                     """
-                }
-            }
-        }
-
-        stage('Configure Systemd') {
-            steps {
-
-                sshagent(["${SSH_CREDENTIALS}"]) {
-
-                    sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_HOST} \
-                        'bash -s' << 'REMOTE'
-
-set -e
-
-sudo tee /etc/systemd/system/${APP_NAME}.service > /dev/null <<EOF
-[Unit]
-Description=${APP_NAME} Spring Boot Application
-After=network.target
-
-[Service]
-Type=simple
-User=${APP_NAME}
-Group=${APP_NAME}
-WorkingDirectory=${APP_DIR}
-
-ExecStart=/usr/bin/java -jar ${APP_DIR}/${APP_NAME}.jar
-
-Restart=always
-RestartSec=5
-
-SuccessExitStatus=143
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable ${APP_NAME}
-
-REMOTE
-                    """
-                }
-            }
-        }
-
-        stage('Restart Application') {
-            steps {
-
-                sshagent(["${SSH_CREDENTIALS}"]) {
-
-                    sh """
-                        ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_HOST} \
-                        'sudo systemctl restart ${APP_NAME}'
-                    """
-
-                    sleep 10
                 }
             }
         }
 
         stage('Health Check') {
+
             steps {
 
-                sh """
+                sshagent(['aws-vm-key']) {
 
-                    echo "Checking application..."
+                    sh """
 
-                    curl \
-                    --fail \
-                    --show-error \
-                    --silent \
-                    http://${VM_HOST}:8080/ \
-                    > /dev/null
+                        ssh -o StrictHostKeyChecking=no \
+                        ${VM_USER}@${VM_IP} << 'EOF'
 
-                    echo "Application is UP"
-                """
+                        echo "Checking application..."
+
+                        sleep 5
+
+                        curl -f http://localhost:${TOMCAT_PORT}/ || {
+
+                            echo "Application health check failed"
+
+                            echo "Application logs:"
+                            tail -100 ${APP_DIR}/application.log
+
+                            exit 1
+                        }
+
+                        echo "Application is UP"
+
+                        EOF
+
+                    """
+                }
             }
         }
     }
@@ -276,26 +266,25 @@ REMOTE
     post {
 
         success {
-            echo """
-========================================
-CD SUCCESS
-========================================
-Application : ${APP_NAME}
-VM          : ${VM_HOST}
-Port        : 8080
-CI Build    : ${CI_BUILD_NUMBER}
-========================================
-"""
+
+            echo '''
+            ========================================
+            CD SUCCESS
+            ========================================
+            Application deployed successfully.
+            '''
+
         }
 
         failure {
-            echo """
-========================================
-CD FAILED
-========================================
 
-Check the failed stage.
-"""
+            echo '''
+            ========================================
+            CD FAILED
+            ========================================
+            Check the failed stage.
+            '''
+
         }
     }
 }
