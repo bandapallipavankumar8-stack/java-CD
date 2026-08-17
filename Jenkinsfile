@@ -1,45 +1,48 @@
 pipeline {
+
     agent any
 
     environment {
+
         VM_HOST = '43.204.217.49'
         VM_USER = 'ec2-user'
 
         APP_NAME = 'java-vm-demo'
+
         TOMCAT_HOME = '/opt/tomcat'
 
         SSH_CREDENTIALS = 'vm-deploy-key'
 
-        CI_JOB_NAME = 'CI-JOB'
+        CI_JOB = 'java-vm-demo-CI'
     }
 
     stages {
 
         /*
-         * Get the WAR produced by CI
+         * 1. Get WAR produced by CI
          */
-        stage('Get CI Artifact') {
+        stage('Get Artifact From CI') {
+
             steps {
 
                 copyArtifacts(
-                    projectName: "${CI_JOB_NAME}",
+                    projectName: "${CI_JOB}",
                     selector: lastSuccessful(),
                     filter: 'target/*.war'
                 )
 
                 sh '''
-                    echo "===== CI Artifact ====="
-                    find . -name "*.war" -type f
+                    echo "CI artifact:"
+                    find . -name "*.war" -type f -ls
                 '''
             }
         }
 
 
         /*
-         * Connect to Amazon Linux VM
-         * Install Java and Tomcat if required
+         * 2. Install Java and Tomcat
          */
-        stage('Prepare Amazon Linux VM') {
+        stage('Prepare VM') {
 
             steps {
 
@@ -48,20 +51,14 @@ pipeline {
                     sh """
 
                         ssh -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_HOST} 'bash -s' << 'REMOTE_SCRIPT'
+                        ${VM_USER}@${VM_HOST} 'bash -s' << 'REMOTE'
 
                         set -e
 
-                        echo "======================================"
-                        echo "Checking Amazon Linux"
-                        echo "======================================"
-
-                        cat /etc/os-release
-
-
-                        echo "======================================"
+                        echo "================================="
                         echo "Checking Java"
-                        echo "======================================"
+                        echo "================================="
+
 
                         if command -v java >/dev/null 2>&1
                         then
@@ -72,20 +69,19 @@ pipeline {
                         else
 
                             echo "Java not installed"
-                            echo "Installing Java..."
+                            echo "Installing Java 17..."
 
                             sudo dnf install -y java-17-amazon-corretto
-
-                            echo "Java installation completed"
 
                             java -version
 
                         fi
 
 
-                        echo "======================================"
+                        echo "================================="
                         echo "Checking Tomcat"
-                        echo "======================================"
+                        echo "================================="
+
 
                         if [ -f ${TOMCAT_HOME}/bin/catalina.sh ]
                         then
@@ -94,7 +90,6 @@ pipeline {
 
                         else
 
-                            echo "Tomcat not installed"
                             echo "Installing Tomcat..."
 
                             cd /tmp
@@ -103,12 +98,8 @@ pipeline {
                             https://dlcdn.apache.org/tomcat/tomcat-10/v10.1.46/bin/apache-tomcat-10.1.46.tar.gz
 
 
-                            echo "Creating Tomcat directory"
-
                             sudo mkdir -p ${TOMCAT_HOME}
 
-
-                            echo "Extracting Tomcat"
 
                             sudo tar -xzf \
                             apache-tomcat-10.1.46.tar.gz \
@@ -116,7 +107,7 @@ pipeline {
                             -C ${TOMCAT_HOME}
 
 
-                            echo "Creating tomcat user"
+                            echo "Creating Tomcat user"
 
                             sudo useradd \
                             --system \
@@ -125,11 +116,13 @@ pipeline {
                             tomcat 2>/dev/null || true
 
 
-                            echo "Setting permissions"
+                            sudo chown -R \
+                            tomcat:tomcat \
+                            ${TOMCAT_HOME}
 
-                            sudo chown -R tomcat:tomcat ${TOMCAT_HOME}
 
-                            sudo chmod +x ${TOMCAT_HOME}/bin/*.sh
+                            sudo chmod +x \
+                            ${TOMCAT_HOME}/bin/*.sh
 
 
                             echo "Creating systemd service"
@@ -162,8 +155,6 @@ WantedBy=multi-user.target
 EOF
 
 
-                            echo "Reloading systemd"
-
                             sudo systemctl daemon-reload
 
                             sudo systemctl enable tomcat
@@ -173,13 +164,14 @@ EOF
                         fi
 
 
-                        echo "======================================"
+                        echo "================================="
                         echo "Tomcat status"
-                        echo "======================================"
+                        echo "================================="
 
                         sudo systemctl status tomcat --no-pager || true
 
-                        REMOTE_SCRIPT
+
+                        REMOTE
 
                     """
                 }
@@ -188,19 +180,15 @@ EOF
 
 
         /*
-         * Copy WAR from Jenkins to VM
+         * 3. Copy WAR from Jenkins to VM
          */
-        stage('Copy WAR to VM') {
+        stage('Copy WAR') {
 
             steps {
 
                 sshagent(["${SSH_CREDENTIALS}"]) {
 
                     sh """
-
-                        echo "======================================"
-                        echo "Finding WAR"
-                        echo "======================================"
 
                         WAR_FILE=\\\$(find . -name "*.war" -type f | head -1)
 
@@ -215,13 +203,8 @@ EOF
                         fi
 
 
-                        echo "WAR found:"
+                        echo "WAR:"
                         echo "\\\$WAR_FILE"
-
-
-                        echo "======================================"
-                        echo "Copying WAR to Amazon Linux"
-                        echo "======================================"
 
 
                         scp \
@@ -236,7 +219,7 @@ EOF
 
 
         /*
-         * Deploy WAR into Tomcat
+         * 4. Deploy application
          */
         stage('Deploy Application') {
 
@@ -252,16 +235,12 @@ EOF
 
                             set -e
 
-                            echo "======================================"
                             echo "Stopping Tomcat"
-                            echo "======================================"
 
                             sudo systemctl stop tomcat
 
 
-                            echo "======================================"
-                            echo "Removing old application"
-                            echo "======================================"
+                            echo "Removing old deployment"
 
                             sudo rm -rf \
                             ${TOMCAT_HOME}/webapps/${APP_NAME}
@@ -270,9 +249,7 @@ EOF
                             ${TOMCAT_HOME}/webapps/${APP_NAME}.war
 
 
-                            echo "======================================"
-                            echo "Deploying new WAR"
-                            echo "======================================"
+                            echo "Copying new WAR"
 
                             sudo cp \
                             /tmp/${APP_NAME}.war \
@@ -284,21 +261,15 @@ EOF
                             ${TOMCAT_HOME}/webapps/${APP_NAME}.war
 
 
-                            echo "======================================"
                             echo "Starting Tomcat"
-                            echo "======================================"
 
                             sudo systemctl start tomcat
 
 
-                            echo "Waiting for application startup..."
+                            echo "Waiting for application..."
 
                             sleep 10
 
-
-                            echo "======================================"
-                            echo "Tomcat status"
-                            echo "======================================"
 
                             sudo systemctl status tomcat --no-pager
 
@@ -310,7 +281,7 @@ EOF
 
 
         /*
-         * Verify application
+         * 5. Health check
          */
         stage('Health Check') {
 
@@ -318,20 +289,16 @@ EOF
 
                 sh """
 
-                    echo "======================================"
-                    echo "Application Health Check"
-                    echo "======================================"
-
+                    echo "Checking application..."
 
                     curl -f \
                     http://${VM_HOST}:8080/${APP_NAME}/
 
-
                     echo ""
 
-                    echo "======================================"
+                    echo "================================="
                     echo "DEPLOYMENT SUCCESSFUL"
-                    echo "======================================"
+                    echo "================================="
 
                 """
             }
@@ -343,37 +310,13 @@ EOF
 
         success {
 
-            echo '''
-            ======================================
-            CD SUCCESS
-            ======================================
-
-            Application deployed successfully
-            to Amazon Linux VM.
-
-            VM:
-            43.204.217.49
-
-            Tomcat:
-            8080
-
-            ======================================
-            '''
+            echo "CD SUCCESS: Application deployed to ${VM_HOST}"
 
         }
 
-
         failure {
 
-            echo '''
-            ======================================
-            CD FAILED
-            ======================================
-
-            Please check Jenkins console output.
-
-            ======================================
-            '''
+            echo "CD FAILED: Check Jenkins console logs."
 
         }
     }
