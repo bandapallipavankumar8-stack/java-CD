@@ -3,46 +3,38 @@ pipeline {
     agent any
 
     environment {
-
         VM_HOST = '43.204.217.49'
         VM_USER = 'ec2-user'
 
         APP_NAME = 'java-vm-demo'
-
-        TOMCAT_HOME = '/opt/tomcat'
+        APP_DIR = '/opt/java-vm-demo'
 
         SSH_CREDENTIALS = 'vm-deploy-key'
 
-        CI_JOB = 'java-vm-demo-CI'
+        CI_JOB = 'Java_CI'
     }
 
     stages {
 
-        /*
-         * 1. Get WAR produced by CI
-         */
-        stage('Get Artifact From CI') {
-
+        stage('Download Artifact From CI') {
             steps {
 
                 copyArtifacts(
                     projectName: "${CI_JOB}",
                     selector: lastSuccessful(),
-                    filter: 'target/*.war'
+                    filter: 'target/*.jar'
                 )
 
                 sh '''
-                    echo "CI artifact:"
-                    find . -name "*.war" -type f -ls
+                    echo "===== Artifact ====="
+
+                    find . -name "*.jar" -type f -ls
                 '''
             }
         }
 
 
-        /*
-         * 2. Install Java and Tomcat
-         */
-        stage('Prepare VM') {
+        stage('Prepare Amazon Linux VM') {
 
             steps {
 
@@ -55,99 +47,62 @@ pipeline {
 
                         set -e
 
-                        echo "================================="
+                        echo "======================================"
                         echo "Checking Java"
-                        echo "================================="
-
+                        echo "======================================"
 
                         if command -v java >/dev/null 2>&1
                         then
-
                             echo "Java already installed"
                             java -version
 
                         else
-
-                            echo "Java not installed"
-                            echo "Installing Java 17..."
+                            echo "Installing Java 17"
 
                             sudo dnf install -y java-17-amazon-corretto
 
                             java -version
-
                         fi
 
 
-                        echo "================================="
-                        echo "Checking Tomcat"
-                        echo "================================="
+                        echo "======================================"
+                        echo "Creating application directory"
+                        echo "======================================"
 
+                        sudo mkdir -p ${APP_DIR}
 
-                        if [ -f ${TOMCAT_HOME}/bin/catalina.sh ]
-                        then
-
-                            echo "Tomcat already installed"
-
-                        else
-
-                            echo "Installing Tomcat..."
-
-                            cd /tmp
-
-                            wget -q \
-                            https://dlcdn.apache.org/tomcat/tomcat-10/v10.1.46/bin/apache-tomcat-10.1.46.tar.gz
-
-
-                            sudo mkdir -p ${TOMCAT_HOME}
-
-
-                            sudo tar -xzf \
-                            apache-tomcat-10.1.46.tar.gz \
-                            --strip-components=1 \
-                            -C ${TOMCAT_HOME}
-
-
-                            echo "Creating Tomcat user"
-
-                            sudo useradd \
+                        sudo useradd \
                             --system \
-                            --home ${TOMCAT_HOME} \
                             --shell /sbin/nologin \
-                            tomcat 2>/dev/null || true
+                            ${APP_NAME} 2>/dev/null || true
+
+                        sudo chown -R \
+                            ${APP_NAME}:${APP_NAME} \
+                            ${APP_DIR}
 
 
-                            sudo chown -R \
-                            tomcat:tomcat \
-                            ${TOMCAT_HOME}
+                        echo "======================================"
+                        echo "Creating systemd service"
+                        echo "======================================"
 
-
-                            sudo chmod +x \
-                            ${TOMCAT_HOME}/bin/*.sh
-
-
-                            echo "Creating systemd service"
-
-
-                            sudo tee /etc/systemd/system/tomcat.service > /dev/null <<EOF
+                        sudo tee /etc/systemd/system/${APP_NAME}.service > /dev/null <<EOF
 
 [Unit]
-Description=Apache Tomcat
+Description=Java VM Demo Application
 After=network.target
 
 [Service]
-Type=forking
+User=${APP_NAME}
+Group=${APP_NAME}
 
-User=tomcat
-Group=tomcat
+WorkingDirectory=${APP_DIR}
 
-Environment="JAVA_HOME=/usr/lib/jvm/java-17-amazon-corretto"
-Environment="CATALINA_HOME=${TOMCAT_HOME}"
-Environment="CATALINA_BASE=${TOMCAT_HOME}"
+ExecStart=/usr/bin/java -jar ${APP_DIR}/${APP_NAME}.jar
 
-ExecStart=${TOMCAT_HOME}/bin/startup.sh
-ExecStop=${TOMCAT_HOME}/bin/shutdown.sh
+Restart=always
+RestartSec=5
 
-Restart=on-failure
+Environment="JAVA_OPTS=-Xms256m -Xmx512m"
 
 [Install]
 WantedBy=multi-user.target
@@ -155,21 +110,9 @@ WantedBy=multi-user.target
 EOF
 
 
-                            sudo systemctl daemon-reload
+                        sudo systemctl daemon-reload
 
-                            sudo systemctl enable tomcat
-
-                            sudo systemctl start tomcat
-
-                        fi
-
-
-                        echo "================================="
-                        echo "Tomcat status"
-                        echo "================================="
-
-                        sudo systemctl status tomcat --no-pager || true
-
+                        sudo systemctl enable ${APP_NAME}
 
                         REMOTE
 
@@ -179,48 +122,6 @@ EOF
         }
 
 
-        /*
-         * 3. Copy WAR from Jenkins to VM
-         */
-        stage('Copy WAR') {
-
-            steps {
-
-                sshagent(["${SSH_CREDENTIALS}"]) {
-
-                    sh """
-
-                        WAR_FILE=\\\$(find . -name "*.war" -type f | head -1)
-
-
-                        if [ -z "\\\$WAR_FILE" ]
-                        then
-
-                            echo "ERROR: WAR file not found"
-
-                            exit 1
-
-                        fi
-
-
-                        echo "WAR:"
-                        echo "\\\$WAR_FILE"
-
-
-                        scp \
-                        -o StrictHostKeyChecking=no \
-                        "\\\$WAR_FILE" \
-                        ${VM_USER}@${VM_HOST}:/tmp/${APP_NAME}.war
-
-                    """
-                }
-            }
-        }
-
-
-        /*
-         * 4. Deploy application
-         */
         stage('Deploy Application') {
 
             steps {
@@ -229,76 +130,92 @@ EOF
 
                     sh """
 
+                        echo "======================================"
+                        echo "Finding JAR"
+                        echo "======================================"
+
+                        JAR_FILE=\\\$(find . -name "*.jar" -type f | head -1)
+
+
+                        if [ -z "\\\$JAR_FILE" ]
+                        then
+
+                            echo "ERROR: JAR file not found"
+
+                            exit 1
+
+                        fi
+
+
+                        echo "Deploying: \\\$JAR_FILE"
+
+
+                        echo "======================================"
+                        echo "Copying JAR to VM"
+                        echo "======================================"
+
+
+                        scp \
+                            -o StrictHostKeyChecking=no \
+                            "\\\$JAR_FILE" \
+                            ${VM_USER}@${VM_HOST}:/tmp/${APP_NAME}.jar
+
+
+                        echo "======================================"
+                        echo "Installing application"
+                        echo "======================================"
+
+
                         ssh \
-                        -o StrictHostKeyChecking=no \
-                        ${VM_USER}@${VM_HOST} '
+                            -o StrictHostKeyChecking=no \
+                            ${VM_USER}@${VM_HOST} '
 
                             set -e
 
-                            echo "Stopping Tomcat"
-
-                            sudo systemctl stop tomcat
-
-
-                            echo "Removing old deployment"
-
-                            sudo rm -rf \
-                            ${TOMCAT_HOME}/webapps/${APP_NAME}
-
-                            sudo rm -f \
-                            ${TOMCAT_HOME}/webapps/${APP_NAME}.war
-
-
-                            echo "Copying new WAR"
-
                             sudo cp \
-                            /tmp/${APP_NAME}.war \
-                            ${TOMCAT_HOME}/webapps/${APP_NAME}.war
-
+                                /tmp/${APP_NAME}.jar \
+                                ${APP_DIR}/${APP_NAME}.jar
 
                             sudo chown \
-                            tomcat:tomcat \
-                            ${TOMCAT_HOME}/webapps/${APP_NAME}.war
+                                ${APP_NAME}:${APP_NAME} \
+                                ${APP_DIR}/${APP_NAME}.jar
 
-
-                            echo "Starting Tomcat"
-
-                            sudo systemctl start tomcat
-
-
-                            echo "Waiting for application..."
+                            sudo systemctl restart ${APP_NAME}
 
                             sleep 10
 
+                            sudo systemctl status \
+                                ${APP_NAME} \
+                                --no-pager
 
-                            sudo systemctl status tomcat --no-pager
+                            '
 
-                        '
                     """
                 }
             }
         }
 
 
-        /*
-         * 5. Health check
-         */
         stage('Health Check') {
 
             steps {
 
                 sh """
 
-                    echo "Checking application..."
+                    echo "======================================"
+                    echo "Health Check"
+                    echo "======================================"
+
 
                     curl -f \
-                    http://${VM_HOST}:8080/${APP_NAME}/
+                        http://${VM_HOST}:8080/
+
 
                     echo ""
 
-                    echo "================================="
+                    echo "======================================"
                     echo "DEPLOYMENT SUCCESSFUL"
-                    echo "================================="
+                    echo "======================================"
 
                 """
             }
@@ -309,15 +226,11 @@ EOF
     post {
 
         success {
-
-            echo "CD SUCCESS: Application deployed to ${VM_HOST}"
-
+            echo "CD SUCCESS"
         }
 
         failure {
-
-            echo "CD FAILED: Check Jenkins console logs."
-
+            echo "CD FAILED"
         }
     }
 }
