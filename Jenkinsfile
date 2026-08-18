@@ -1,6 +1,11 @@
 pipeline {
     agent any
     
+    // This tells Jenkins to handle the Maven installation automatically
+    tools {
+        maven 'Maven-Latest'
+    }
+    
     environment {
         TARGET_IP = '15.207.248.30'
         SERVER_USER = 'ec2-user' 
@@ -10,9 +15,8 @@ pipeline {
     stages {
         stage('Build & Package Code') {
             steps {
-                // Changed from 'mvn' to using the local folder's execution wrapper
-                sh 'chmod +x mvnw || true'
-                sh './mvnw clean package -DskipTests'
+                // Jenkins will now provide the 'mvn' command automatically
+                sh 'mvn clean package -DskipTests'
             }
         }
         
