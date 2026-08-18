@@ -12,14 +12,16 @@ pipeline {
         stage('Deploy to Target Machine') {
             steps {
                 sshagent([SSH_CRED_ID]) {
-                    // Running commands cleanly without verbose connection testing logs
-                    sh """
-                        ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "
-                            pkill -f '.jar' || true
-                            aws s3 cp ${S3_BUCKET} . --recursive --exclude '*' --include '*.jar'
-                            nohup java -jar *.jar > app.log 2>&1 &
-                        "
-                    """
+                    // Separate commands with simple quotes to avoid escape failures
+                    
+                    // 1. Stop any old instance of your app running on the target machine
+                    sh "ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} 'pkill -f .jar || true'"
+                    
+                    // 2. Download the package from S3 onto the target machine
+                    sh "ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} 'aws s3 cp ${S3_BUCKET} . --recursive --exclude \"*\" --include \"*.jar\"'"
+                    
+                    // 3. Launch the new package in the background
+                    sh "ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} 'nohup java -jar *.jar > app.log 2>&1 &'"
                 }
             }
         }
