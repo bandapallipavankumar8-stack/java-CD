@@ -1,8 +1,6 @@
 pipeline {
     agent any
     
-    // REMOVED THE TOOLS BLOCK COMPLETELY TO BYPASS SYSTEM CONFIGURATION MISMATCHES
-    
     environment {
         TARGET_IP = '15.207.248.30'
         SERVER_USER = 'ec2-user' 
@@ -12,8 +10,9 @@ pipeline {
     stages {
         stage('Build & Package Code') {
             steps {
-                // Compiles code into target/*.jar using the system's global maven setup
-                sh 'mvn clean package -DskipTests'
+                // Changed from 'mvn' to using the local folder's execution wrapper
+                sh 'chmod +x mvnw || true'
+                sh './mvnw clean package -DskipTests'
             }
         }
         
@@ -26,7 +25,6 @@ pipeline {
                         sleep 2
                         
                         echo "=== Step 2: Uploading JAR directly from Jenkins to Target ==="
-                        # Copies your freshly built local target bundle over to your ec2-user directory
                         scp -i \$KEY_FILE -o StrictHostKeyChecking=no target/*.jar ${SERVER_USER}@${TARGET_IP}:/home/${SERVER_USER}/
                         
                         echo "=== Step 3: Launching application in background ==="
