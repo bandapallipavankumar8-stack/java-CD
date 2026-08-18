@@ -1,25 +1,50 @@
-Started by user Admin
-Obtained Jenkinsfile from git https://github.com/bandapallipavankumar8-stack/java-CD/
-org.codehaus.groovy.control.MultipleCompilationErrorsException: startup failed:
-WorkflowScript: 6: Tool type "jdk" does not have an install of "jdk" configured - did you mean "null"? @ line 6, column 13.
-           jdk 'jdk' 
-               ^
-
-1 error
-
-	at org.codehaus.groovy.control.ErrorCollector.failIfErrors(ErrorCollector.java:309)
-	at org.codehaus.groovy.control.CompilationUnit.applyToPrimaryClassNodes(CompilationUnit.java:1107)
-	at org.codehaus.groovy.control.CompilationUnit.doPhaseOperation(CompilationUnit.java:624)
-	at org.codehaus.groovy.control.CompilationUnit.processPhaseOperations(CompilationUnit.java:602)
-	at org.codehaus.groovy.control.CompilationUnit.compile(CompilationUnit.java:579)
-	at groovy.lang.GroovyClassLoader.doParseClass(GroovyClassLoader.java:323)
-	at groovy.lang.GroovyClassLoader.parseClass(GroovyClassLoader.java:293)
-	at PluginClassLoader for script-security//org.jenkinsci.plugins.scriptsecurity.sandbox.groovy.GroovySandbox$Scope.parse(GroovySandbox.java:162)
-	at PluginClassLoader for workflow-cps//org.jenkinsci.plugins.workflow.cps.CpsGroovyShell.doParse(CpsGroovyShell.java:202)
-	at PluginClassLoader for workflow-cps//org.jenkinsci.plugins.workflow.cps.CpsGroovyShell.reparse(CpsGroovyShell.java:186)
-	at PluginClassLoader for workflow-cps//org.jenkinsci.plugins.workflow.cps.CpsFlowExecution.parseScript(CpsFlowExecution.java:670)
-	at PluginClassLoader for workflow-cps//org.jenkinsci.plugins.workflow.cps.CpsFlowExecution.start(CpsFlowExecution.java:616)
-	at PluginClassLoader for workflow-job//org.jenkinsci.plugins.workflow.job.WorkflowRun.run(WorkflowRun.java:368)
-	at hudson.model.ResourceController.execute(ResourceController.java:97)
-	at hudson.model.Executor.run(Executor.java:456)
-Finished: FAILURE
+pipeline {
+    agent any
+    
+    // REMOVED THE TOOLS BLOCK COMPLETELY TO BYPASS SYSTEM CONFIGURATION MISMATCHES
+    
+    environment {
+        TARGET_IP = '15.207.248.30'
+        SERVER_USER = 'ec2-user' 
+        SSH_KEY = credentials('target-server-ssh-key')
+    }
+    
+    stages {
+        stage('Build & Package Code') {
+            steps {
+                // Compiles code into target/*.jar using the system's global maven setup
+                sh 'mvn clean package -DskipTests'
+            }
+        }
+        
+        stage('Deploy Directly to Target Machine') {
+            steps {
+                withCredentials([sshUserPrivateKey(credentialsId: 'target-server-ssh-key', keyFileVariable: 'KEY_FILE')]) {
+                    sh """
+                        echo "=== Step 1: Stopping old Java applications ==="
+                        ssh -i \$KEY_FILE -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "pkill -f '\\.jar'" || true
+                        sleep 2
+                        
+                        echo "=== Step 2: Uploading JAR directly from Jenkins to Target ==="
+                        # Copies your freshly built local target bundle over to your ec2-user directory
+                        scp -i \$KEY_FILE -o StrictHostKeyChecking=no target/*.jar ${SERVER_USER}@${TARGET_IP}:/home/${SERVER_USER}/
+                        
+                        echo "=== Step 3: Launching application in background ==="
+                        ssh -i \$KEY_FILE -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "nohup java -jar /home/${SERVER_USER}/*.jar > app.log 2>&1 &"
+                        
+                        echo "=== Deployment Successfully Completed ==="
+                    """
+                }
+            }
+        }
+    }
+    
+    post {
+        success {
+            echo 'CD Direct Deployment - SUCCESS!'
+        }
+        failure {
+            echo 'CD Direct Deployment - FAILED.'
+        }
+    }
+}
