@@ -2,30 +2,32 @@ pipeline {
     agent any
     
     environment {
-        S3_BUCKET = 's3://code-version/packages/'
+        // 1. Remote machine connection details
         TARGET_IP = '15.207.248.30'
         SERVER_USER = 'ec2-user' 
-        SSH_KEY = credentials('target-server-ssh-key')
         
-        // This maps the code variables to the Jenkins IDs you just created
-        AWS_ACCESS_KEY_ID = credentials('aws-access-key')
-        AWS_SECRET_ACCESS_KEY = credentials('aws-secret-key')
+        // 2. Only requires your working target server SSH key credential
+        SSH_KEY = credentials('target-server-ssh-key')
     }
     
     stages {
-        stage('Deploy to Target Machine') {
+        stage('Deploy Directly to Target Machine') {
             steps {
                 withCredentials([sshUserPrivateKey(credentialsId: 'target-server-ssh-key', keyFileVariable: 'KEY_FILE')]) {
                     sh """
-                        # 1. Stop any old instance cleanly
+                        echo "=== Step 1: Stopping old Java applications ==="
                         ssh -i \$KEY_FILE -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "pkill -f '\\.jar'" || true
                         sleep 2
                         
-                        # 2. Download your package from S3 using the new credentials
-                        ssh -i \$KEY_FILE -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "AWS_ACCESS_KEY_ID='${AWS_ACCESS_KEY_ID}' AWS_SECRET_ACCESS_KEY='${AWS_SECRET_ACCESS_KEY}' aws s3 cp ${S3_BUCKET} . --recursive --exclude '*' --include '*.jar'"
+                        echo "=== Step 2: Uploading JAR directly from Jenkins to Target ==="
+                        # This looks inside your current Jenkins build workspace folder for any .jar file
+                        # and copies it safely over the SSH bridge to the ec2-user home folder
+                        scp -i \$KEY_FILE -o StrictHostKeyChecking=no target/*.jar ${SERVER_USER}@${TARGET_IP}:/home/${SERVER_USER}/
                         
-                        # 3. Launch your application in the background
-                        ssh -i \$KEY_FILE -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "nohup java -jar *.jar > app.log 2>&1 &"
+                        echo "=== Step 3: Launching application in background ==="
+                        ssh -i \$KEY_FILE -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "nohup java -jar /home/${SERVER_USER}/*.jar > app.log 2>&1 &"
+                        
+                        echo "=== Deployment Successfully Completed ==="
                     """
                 }
             }
@@ -34,10 +36,10 @@ pipeline {
     
     post {
         success {
-            echo 'CD SUCCESS - Package pulled from S3 and deployed successfully!'
+            echo 'CD Direct Deployment - SUCCESS!'
         }
         failure {
-            echo 'CD FAILED - Deployment failed.'
+            echo 'CD Direct Deployment - FAILED.'
         }
     }
 }
