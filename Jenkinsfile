@@ -4,13 +4,7 @@ pipeline {
     environment {
         S3_BUCKET = 's3://code-version/packages/'
         TARGET_IP = '15.207.248.30'
-        
-        // 👇 DETECT YOUR OS AND CHANGE THIS VARIABLE 👇
-        // For Ubuntu servers: use 'ubuntu'
-        // For Amazon Linux servers: use 'ec2-user'
-        // For CentOS servers: use 'centos'
-        SERVER_USER = 'ubuntu' 
-        
+        SERVER_USER = 'root' // Fixed back to ec2-user based on your manual test!
         SSH_KEY = credentials('target-server-ssh-key')
     }
     
