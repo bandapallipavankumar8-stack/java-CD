@@ -4,15 +4,19 @@ pipeline {
     environment {
         S3_BUCKET = 's3://code-version/packages/'
         TARGET_IP = '15.207.248.30'
-        SERVER_USER = 'ec2-user' 
-        // We use standard credentials provider instead of the sshagent wrapper
+        
+        // 👇 DETECT YOUR OS AND CHANGE THIS VARIABLE 👇
+        // For Ubuntu servers: use 'ubuntu'
+        // For Amazon Linux servers: use 'ec2-user'
+        // For CentOS servers: use 'centos'
+        SERVER_USER = 'ubuntu' 
+        
         SSH_KEY = credentials('target-server-ssh-key')
     }
     
     stages {
         stage('Deploy to Target Machine') {
             steps {
-                // Direct file injection bypasses the ssh-agent login restrictions
                 withCredentials([sshUserPrivateKey(credentialsId: 'target-server-ssh-key', keyFileVariable: 'KEY_FILE')]) {
                     sh """
                         # 1. Stop any old instances of the jar running
