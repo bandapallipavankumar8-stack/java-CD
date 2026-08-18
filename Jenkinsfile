@@ -12,9 +12,9 @@ pipeline {
         stage('Deploy to Target Machine') {
             steps {
                 sshagent([SSH_CRED_ID]) {
-                    // Merged into one single block with double quotes
+                    // Running commands cleanly without verbose connection testing logs
                     sh """
-                        ssh -v -o ConnectTimeout=10 -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "
+                        ssh -o StrictHostKeyChecking=no ${SERVER_USER}@${TARGET_IP} "
                             pkill -f '.jar' || true
                             aws s3 cp ${S3_BUCKET} . --recursive --exclude '*' --include '*.jar'
                             nohup java -jar *.jar > app.log 2>&1 &
